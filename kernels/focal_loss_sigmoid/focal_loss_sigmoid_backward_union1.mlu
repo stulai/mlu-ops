@@ -136,6 +136,7 @@ __mlu_func__ void coreCompute(int8_t *nram_input, const T *nram_weight,
                               const int32_t total_c, const bool pingpong_flag,
                               const int32_t nram_offset,
                               const bool has_weight) {
+  float gamma = ((float *)nram_gamma)[0];
   if (pingpong_flag == PONG) {
     nram_input += nram_offset;
     nram_pt += nram_offset;
@@ -157,9 +158,10 @@ __mlu_func__ void coreCompute(int8_t *nram_input, const T *nram_weight,
 
   // 1. pt = 1 - sigmoid(x)
   __mluop_sigmoid((float *)nram_pt, (float *)nram_input, NULL, 0, compute_num);
-  __bang_mul_scalar((float *)nram_pt, (float *)nram_pt, (float)(-1),
-                    compute_num);
-  __bang_add_scalar((float *)nram_pt, (float *)nram_pt, (float)1, compute_num);
+  // __bang_mul_scalar((float *)nram_pt, (float *)nram_pt, (float)(-1),
+  //                   compute_num);
+  // __bang_add_scalar((float *)nram_pt, (float *)nram_pt, (float)1, compute_num);
+  __bang_fusion(FUSION_FMA, (float *)nram_pt, (float *)nram_pt, (float)(-1), (float)1, compute_num);
 
   // 2. pt      = target[n] == c ? sigmoid(x) : 1 - sigmoid(x)
   //    alpha_t = target[n] == c ? alpha      : alpha - 1
@@ -183,10 +185,11 @@ __mlu_func__ void coreCompute(int8_t *nram_input, const T *nram_weight,
   }
 
   // 3. temp = -alpha_t * e^(gamma * log(max(1 - pt, FLT_MIN))
-  __bang_mul_scalar((float *)nram_temp, (float *)nram_pt, (float)(-1),
-                    compute_num);
-  __bang_add_scalar((float *)nram_temp, (float *)nram_temp, (float)(1),
-                    compute_num);
+  // __bang_mul_scalar((float *)nram_temp, (float *)nram_pt, (float)(-1),
+  //                   compute_num);
+  // __bang_add_scalar((float *)nram_temp, (float *)nram_temp, (float)(1),
+  //                   compute_num);
+  __bang_fusion(FUSION_FMA, (float *)nram_temp, (float *)nram_pt, (float)(-1), (float)1, compute_num);
   __bang_cycle_maxequal((float *)nram_temp, (float *)nram_temp,
                         (float *)nram_flt_min, compute_num, nfu_align_num);
   computeLogE((float *)nram_temp, (float *)nram_temp, compute_num);
@@ -204,14 +207,17 @@ __mlu_func__ void coreCompute(int8_t *nram_input, const T *nram_weight,
   computeLogE((float *)nram_output, (float *)nram_output, compute_num);
   __bang_mul((float *)nram_output, (float *)nram_output, (float *)nram_pt,
              compute_num);
-  __bang_cycle_mul((float *)nram_output, (float *)nram_output,
-                   (float *)nram_gamma, compute_num, nfu_align_num);
-  __bang_add((float *)nram_output, (float *)nram_output, (float *)nram_pt,
-             compute_num);
-  __bang_mul_scalar((float *)nram_output, (float *)nram_output, (float)(-1),
-                    compute_num);
-  __bang_add_scalar((float *)nram_output, (float *)nram_output, (float)(1),
-                    compute_num);
+  // __bang_cycle_mul((float *)nram_output, (float *)nram_output,
+  //                  (float *)nram_gamma, compute_num, nfu_align_num);
+  // __bang_add((float *)nram_output, (float *)nram_output, (float *)nram_pt,
+  //            compute_num);
+  __bang_fusion(FUSION_FMA, (float *)nram_output, (float *)nram_output, gamma, (float *)nram_pt, compute_num, compute_num);
+
+  // __bang_mul_scalar((float *)nram_output, (float *)nram_output, (float)(-1),
+  //                   compute_num);
+  // __bang_add_scalar((float *)nram_output, (float *)nram_output, (float)(1),
+  //                   compute_num);
+  __bang_fusion(FUSION_FMA, (float *)nram_output, (float *)nram_output, (float)(-1), (float)1, compute_num);
 
   // 5. output = output * temp
   __bang_mul((float *)nram_output, (float *)nram_output, (float *)nram_temp,
@@ -232,7 +238,8 @@ __mlu_func__ void coreCompute(int8_t *nram_input, const T *nram_weight,
       int32_t align_c = PAD_UP(total_c, c_align_num);
       int32_t target_value = ((int32_t *)nram_target)[n];
       if (target_value >= total_c || target_value < 0) continue;
-      T weight_value = nram_weight[target_value];
+      // T weight_value = nram_weight[target_value];
+      T weight_value = __load_nram(&nram_weight[target_value]);
       __bang_mul_scalar((T *)nram_output + n * align_c,
                         (T *)nram_output + n * align_c, weight_value, align_c);
     }
